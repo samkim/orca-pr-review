@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# orca-pr-review: scheduled, unattended PR reviews in Orca worktrees.
+# Run `orca-pr-review help` for usage.
+set -euo pipefail
+
+# Orca automations and hooks may run with a minimal PATH.
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir=$(cd -P "$(dirname "$src")" && pwd); src=$(readlink "$src")
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+PLUGIN_ROOT=$(cd -P "$(dirname "$src")/.." && pwd)
+
+# shellcheck source=../lib/common.sh
+source "$PLUGIN_ROOT/lib/common.sh"
+for f in ledger select dispatch post review setup; do
+  # shellcheck source=/dev/null
+  source "$PLUGIN_ROOT/lib/$f.sh"
+done
+
+usage() {
+  cat <<'EOF'
+usage: orca-pr-review [--repo owner/name] [--unattended] <command> [args]
+
+Per repo (--repo, $ORCA_PR_REVIEW_REPO, or the gh repo of the current directory):
+  init [--path DIR] [--force]   write the repo's config, linking its Orca repo
+  config show|get K|set K V     read or change one of the repo's settings
+  install-automation            create the hourly dispatcher automation (disabled)
+  update-automation             apply DISPATCHER_AGENT to the existing automation
+  select [--check|--all]        PRs that would be reviewed now (JSON)
+  route <pr>                    model the PR's review session would use
+  dispatch [--pr N] [--dry-run] start reviews and re-reviews for selected PRs
+           [--allow-session-config]  with --pr: review a PR that changes agent session config
+  post <pr> <review.json>       post a pending GitHub review
+  review show <pr>              your pending review: main comment + line comments
+  review set-body <pr> <file|-> replace the main comment
+  review comment add <pr> <path> <line> <file|-> [LEFT|RIGHT]
+  review comment edit|delete <pr> <comment-id> [<file|->]
+  review submit <pr> comment|approve|request-changes
+                                submit through the API, sending the main comment
+  review threads <pr>           your earlier review threads with their replies (JSON)
+  review resolve <pr> <thread-id>  resolve one of those threads
+  ledger get|set|in-flight|dump review state for the repo
+  backfill                      re-run the dispatcher if more PRs are waiting
+  in-window                     exit 0 inside the review window (FORCE=1 bypasses)
+  doctor                        check dependencies and setup (and the repo's, with --repo)
+
+Global:
+  --repo and --unattended may also follow the command name, except for config,
+  post, review and ledger, whose own arguments may look like flags.
+  --unattended                  refuse every command that publishes, deletes, or changes
+                                setup (also set by ORCA_PR_REVIEW_UNATTENDED=1). Review
+                                sessions get it; finalizing runs without it.
+  session-checks <base>         print the stage 0 session config and symlink check
+                                commands for a PR against <base> (by-hand reviews)
+  install-shim [--latest]       write the stable ~/.local/bin/orca-pr-review; --latest
+                                points it at the newest installed plugin version
+  record-root                   remember the plugin location (SessionStart hook)
+  repos                         list configured repos
+EOF
+}
+
+repo="${ORCA_PR_REVIEW_REPO:-}"
+UNATTENDED=0
+[ "${ORCA_PR_REVIEW_UNATTENDED:-}" = 1 ] && UNATTENDED=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) [ $# -ge 2 ] || die "--repo needs owner/name"; repo="$2"; shift 2 ;;
+    --unattended) UNATTENDED=1; shift ;;
+    --repo=*) repo="${1#--repo=}"; shift ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+
+# Global flags after the command name (`doctor --repo owner/name`). Accepted
+# only for commands whose own arguments are flags or a PR number, never for
+# config, post, review or ledger: their positional values (a setting's value,
+# a file name, key=value) may legitimately look like a flag, and must reach the
+# command unchanged. Moving --unattended here can only make a run stricter.
+case "$cmd" in
+  doctor|init|select|route|dispatch|install-automation|update-automation|backfill|in-window|session-checks|repos|install-shim|record-root)
+    rest=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) [ $# -ge 2 ] || die "--repo needs owner/name"; repo="$2"; shift 2 ;;
+        --repo=*) repo="${1#--repo=}"; shift ;;
+        --unattended) UNATTENDED=1; shift ;;
+        *) rest+=("$1"); shift ;;
+      esac
+    done
+    set -- ${rest[@]+"${rest[@]}"} ;;
+esac
+
+# Unattended review sessions read the PR's diff, body and threads, any of which
+# can carry injected instructions. In that mode the CLI runs only what the
+# review-pr and re-review-pr skills need: reads, the pending review (post and
+# its edits), the session's own terminal ledger states, and backfill. Anything
+# that publishes, deletes, or changes setup is refused. This guards against a
+# model talked into calling the CLI; it is not a sandbox, since the session
+# also holds the user's gh token.
+refuse_unattended() {
+  [ "$UNATTENDED" = 1 ] || return 0
+  die "refusing '$*' in unattended mode: it publishes, deletes, or changes setup. Run it yourself, or ask the finalize-review session, without --unattended and with ORCA_PR_REVIEW_UNATTENDED unset."
+}
+
+unattended_guard() { # <cmd> <args...>
+  local c="$1"; shift
+  case "$c" in
+    select|route|post|backfill|in-window|doctor|repos|session-checks|"") ;;
+    config) [ "${1:-}" = show ] || [ "${1:-}" = get ] || refuse_unattended config "$@" ;;
+    review)
+      case "${1:-}" in
+        show|set-body|threads) ;;
+        comment) case "${2:-}" in add|edit) ;; *) refuse_unattended review "$@" ;; esac ;;
+        *) refuse_unattended review "$@" ;;
+      esac ;;
+    ledger)
+      case "${1:-}" in
+        get|in-flight|dump) ;;
+        set) case "${3:-}" in reviewed|failed) ;; *) refuse_unattended ledger "$@" ;; esac ;;
+        *) refuse_unattended ledger "$@" ;;
+      esac ;;
+    *) refuse_unattended "$c" "$@" ;;
+  esac
+}
+unattended_guard "$cmd" "$@"
+
+needs_repo() {
+  if [ -z "$repo" ]; then
+    repo=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
+      || die "$cmd needs --repo owner/name"
+  fi
+  load_repo "$repo"
+}
+
+case "$cmd" in
+  record-root) cmd_record_root ;;
+  install-shim) cmd_install_shim "$@" ;;
+  repos) cmd_repos ;;
+  session-checks) cmd_session_checks "$@" ;;
+  doctor) if [ -n "$repo" ]; then load_repo "$repo"; fi; cmd_doctor ;;
+  init) needs_repo; cmd_init "$@" ;;
+  config) needs_repo; cmd_config "$@" ;;
+  install-automation) needs_repo; cmd_install_automation ;;
+  update-automation) needs_repo; cmd_update_automation ;;
+  select) needs_repo; cmd_select "$@" ;;
+  route) needs_repo; cmd_route "$@" ;;
+  dispatch) needs_repo; cmd_dispatch "$@" ;;
+  post) needs_repo; cmd_post "$@" ;;
+  review) needs_repo; cmd_review "$@" ;;
+  ledger) needs_repo; cmd_ledger "$@" ;;
+  backfill) needs_repo; cmd_backfill ;;
+  in-window) needs_repo; in_window ;;
+  "") usage; exit 2 ;;
+  *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac

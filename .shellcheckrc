@@ -1,0 +1,7 @@
+# lib/*.sh and config/defaults.sh are sourced by bin/orca-pr-review, not run.
+shell=bash
+external-sources=true
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/..
+# GraphQL queries and jq filters are single-quoted so $vars reach gh/jq unexpanded.
+disable=SC2016

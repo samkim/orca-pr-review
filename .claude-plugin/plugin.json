@@ -1,0 +1,18 @@
+{
+  "name": "orca-pr-review",
+  "description": "Scheduled, unattended pull request reviews in Orca worktrees: a concerns pass, /code-review focused on those concerns, adversarial validation, posted as a pending GitHub review.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Sam Kim"
+  },
+  "homepage": "https://github.com/samkim/orca-pr-review",
+  "repository": "https://github.com/samkim/orca-pr-review",
+  "keywords": [
+    "orca",
+    "code-review",
+    "github",
+    "automation",
+    "pull-requests"
+  ],
+  "license": "MIT"
+}

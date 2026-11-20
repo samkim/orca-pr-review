@@ -1,0 +1,13 @@
+{
+  "name": "orca-pr-review",
+  "owner": { "name": "Sam Kim" },
+  "metadata": { "description": "Scheduled, unattended pull request reviews in Orca worktrees, posted as pending GitHub reviews." },
+  "plugins": [
+    {
+      "name": "orca-pr-review",
+      "description": "Scheduled, unattended pull request reviews in Orca worktrees, posted as pending GitHub reviews.",
+      "source": "./",
+      "author": { "name": "Sam Kim" }
+    }
+  ]
+}
